@@ -89,4 +89,12 @@ router.put('/:id/approve', (req, res) => {
   );
 });
 
+router.put('/:id/reject', (req, res) => {
+  db.query(
+    'UPDATE orders SET status="REJECTED" WHERE id=?',
+    [req.params.id],
+    () => res.json({ message: 'Rejected' })
+  );
+});
+
 module.exports = router;
