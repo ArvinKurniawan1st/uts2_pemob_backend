@@ -2,99 +2,152 @@ const express = require('express');
 const db = require('../config/db');
 const router = express.Router();
 
+/**
+ * =====================================================
+ * POST /orders
+ * Membuat order + order_items
+ * =====================================================
+ */
 router.post('/', async (req, res) => {
   const { user_id, items, shipping_cost } = req.body;
-  let subtotal = 0;
 
-  for (let item of items) {
-    const [product] = await db.promise().query(
-      'SELECT price_per_kg FROM products WHERE id=?',
-      [item.product_id]
-    );
-
-    if (product.length === 0) {
-      return res.status(400).json({ error: 'Produk tidak ditemukan' });
-    }
-
-    subtotal += product[0].price_per_kg * item.quantity;
+  if (!user_id || !Array.isArray(items) || items.length === 0) {
+    return res.status(400).json({ error: 'Data tidak valid' });
   }
 
-  const total = subtotal + shipping_cost;
+  try {
+    let totalItem = 0;
 
-  const [orderResult] = await db.promise().query(
-    'INSERT INTO orders (user_id, subtotal, shipping_cost, total) VALUES (?,?,?,?)',
-    [user_id, subtotal, shipping_cost, total]
-  );
+    // hitung total
+    for (const item of items) {
+      const [products] = await db.promise().query(
+        'SELECT price_per_kg FROM products WHERE id = ?',
+        [item.product_id]
+      );
 
-  const order_id = orderResult.insertId;
+      if (products.length === 0) {
+        throw new Error('Produk tidak ditemukan');
+      }
 
-  for (let item of items) {
-    const [product] = await db.promise().query(
-      'SELECT price_per_kg FROM products WHERE id=?',
-      [item.product_id]
+      totalItem += products[0].price_per_kg * item.quantity;
+    }
+
+    const total = totalItem + shipping_cost;
+
+    // insert order
+    const [orderResult] = await db.promise().query(
+      'INSERT INTO orders (user_id, shipping_cost, total) VALUES (?,?,?)',
+      [user_id, shipping_cost, total]
     );
 
+    const orderId = orderResult.insertId;
+
+    // insert items
+    for (const item of items) {
+      const [products] = await db.promise().query(
+        'SELECT price_per_kg FROM products WHERE id = ?',
+        [item.product_id]
+      );
+
+      const subTotal = products[0].price_per_kg * item.quantity;
+
+      await db.promise().query(
+        `INSERT INTO order_items
+         (order_id, product_id, quantity, sub_total)
+         VALUES (?,?,?,?)`,
+        [orderId, item.product_id, item.quantity, subTotal]
+      );
+    }
+
+    res.json({ order_id: orderId, shipping_cost, total });
+
+  } catch (err) {
+    console.error('ORDER ERROR:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+/**
+ * =====================================================
+ * GET /orders
+ * Ambil semua order
+ * =====================================================
+ */
+router.get('/', async (req, res) => {
+  try {
+    const [rows] = await db.promise().query(
+      'SELECT * FROM orders ORDER BY id DESC'
+    );
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * =====================================================
+ * GET /orders/:orderId/items
+ * Ambil item per order
+ * =====================================================
+ */
+router.get('/:orderId/items', async (req, res) => {
+  try {
+    const [rows] = await db.promise().query(
+      `
+      SELECT
+        oi.id,
+        p.name AS product_name,
+        oi.quantity,
+        oi.sub_total
+      FROM order_items oi
+      JOIN products p ON p.id = oi.product_id
+      WHERE oi.order_id = ?
+      `,
+      [req.params.orderId]
+    );
+
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+/**
+ * =====================================================
+ * PUT /orders/:id/approve
+ * =====================================================
+ */
+router.put('/:id/approve', async (req, res) => {
+  try {
     await db.promise().query(
-      `INSERT INTO order_items (order_id, product_id, quantity, price)
-       VALUES (?,?,?,?)`,
-      [
-        order_id,
-        item.product_id,
-        item.quantity,
-        product[0].price_per_kg
-      ]
+      'UPDATE orders SET status = "APPROVED" WHERE id = ?',
+      [req.params.id]
     );
+    res.json({ message: 'Order approved' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
+});
 
-  // ❗ RESPONSE TIDAK DIUBAH
-  res.json({ subtotal, shipping_cost, total });
+/**
+ * =====================================================
+ * PUT /orders/:id/reject
+ * =====================================================
+ */
+router.put('/:id/reject', async (req, res) => {
+  try {
+    await db.promise().query(
+      'UPDATE orders SET status = "REJECTED" WHERE id = ?',
+      [req.params.id]
+    );
+    res.json({ message: 'Order rejected' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 
-router.get('/', (req, res) => {
-  db.query('SELECT * FROM orders', (err, results) => {
-    res.json(results);
-  });
-});
-
-router.get('/:orderId/items', (req, res) => {
-  const { orderId } = req.params;
-
-  const sql = `
-    SELECT 
-      oi.id,
-      oi.product_id,
-      p.name AS product_name,
-      oi.quantity,
-      oi.price
-    FROM order_items oi
-    JOIN products p ON p.id = oi.product_id
-    WHERE oi.order_id = ?
-  `;
-
-  db.query(sql, [orderId], (err, results) => {
-    if (err) {
-      return res.status(500).json({ error: err.message });
-    }
-    res.json(results);
-  });
-});
-
-
-router.put('/:id/approve', (req, res) => {
-  db.query(
-    'UPDATE orders SET status="APPROVED" WHERE id=?',
-    [req.params.id],
-    () => res.json({ message: 'Approved' })
-  );
-});
-
-router.put('/:id/reject', (req, res) => {
-  db.query(
-    'UPDATE orders SET status="REJECTED" WHERE id=?',
-    [req.params.id],
-    () => res.json({ message: 'Rejected' })
-  );
-});
 
 module.exports = router;
