@@ -2,12 +2,15 @@ const express = require('express');
 const db = require('../config/db');
 const router = express.Router();
 
-/**
- * =====================================================
- * POST /orders
- * Membuat order + order_items (SNAPSHOT)
- * =====================================================
- */
+router.get('/', async (req, res) => {
+  try {
+    const [rows] = await db.promise().query('SELECT * FROM orders ORDER BY created_at DESC');
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 router.post('/', async (req, res) => {
   const { user_id, items, shipping_cost } = req.body;
 
@@ -23,7 +26,6 @@ router.post('/', async (req, res) => {
     let totalItem = 0;
     const productSnapshots = [];
 
-    // Ambil snapshot produk + hitung total
     for (const item of items) {
       const [products] = await conn.query(
         'SELECT name, price_per_kg FROM products WHERE id = ?',
@@ -50,7 +52,6 @@ router.post('/', async (req, res) => {
 
     const total = totalItem + shipping_cost;
 
-    // Insert order
     const [orderResult] = await conn.query(
       `
       INSERT INTO orders (user_id, shipping_cost, total)
@@ -61,7 +62,6 @@ router.post('/', async (req, res) => {
 
     const orderId = orderResult.insertId;
 
-    // Insert order_items (SNAPSHOT)
     for (const item of productSnapshots) {
       await conn.query(
         `
@@ -98,13 +98,6 @@ router.post('/', async (req, res) => {
   }
 });
 
-
-/**
- * =====================================================
- * GET /orders/user/:userId
- * ORDER HISTORY (USER-BASED)
- * =====================================================
- */
 router.get('/user/:userId', async (req, res) => {
   try {
     const [rows] = await db.promise().query(
@@ -128,40 +121,28 @@ router.get('/user/:userId', async (req, res) => {
   }
 });
 
-
-/**
- * =====================================================
- * GET /orders/:orderId/items
- * DETAIL ORDER (SNAPSHOT)
- * =====================================================
- */
 router.get('/:orderId/items', async (req, res) => {
   try {
     const [rows] = await db.promise().query(
       `
-      SELECT
-        product_name,
-        price,
-        quantity,
-        sub_total
-      FROM order_items
-      WHERE order_id = ?
+      SELECT 
+        p.name AS product_name, 
+        p.price_per_kg AS price, 
+        oi.quantity, 
+        oi.sub_total, 
+        o.shipping_cost
+      FROM order_items oi
+      JOIN products p ON oi.product_id = p.id
+      JOIN orders o ON oi.order_id = o.id
+      WHERE oi.order_id = ?
       `,
       [req.params.orderId]
     );
-
     res.json(rows);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
-
-
-/**
- * =====================================================
- * PUT /orders/:id/approve
- * =====================================================
- */
 router.put('/:id/approve', async (req, res) => {
   const orderId = req.params.id;
   const conn = await db.promise().getConnection();
@@ -169,7 +150,6 @@ router.put('/:id/approve', async (req, res) => {
   try {
     await conn.beginTransaction();
 
-    // Ambil item order
     const [items] = await conn.query(
       `
       SELECT product_id, quantity
@@ -183,7 +163,6 @@ router.put('/:id/approve', async (req, res) => {
       throw new Error('Order item tidak ditemukan');
     }
 
-    // Cek stok SEMUA produk
     for (const item of items) {
       const [[product]] = await conn.query(
         'SELECT stock FROM products WHERE id = ? FOR UPDATE',
@@ -191,7 +170,6 @@ router.put('/:id/approve', async (req, res) => {
       );
 
       if (!product || product.stock < item.quantity) {
-        // AUTO REJECT
         await conn.query(
           'UPDATE orders SET status = "REJECTED" WHERE id = ?',
           [orderId]
@@ -205,7 +183,6 @@ router.put('/:id/approve', async (req, res) => {
       }
     }
 
-    // Jika semua stok cukup → kurangi stok
     for (const item of items) {
       await conn.query(
         'UPDATE products SET stock = stock - ? WHERE id = ?',
@@ -213,7 +190,6 @@ router.put('/:id/approve', async (req, res) => {
       );
     }
 
-    // Update status
     await conn.query(
       'UPDATE orders SET status = "APPROVED" WHERE id = ?',
       [orderId]
@@ -232,13 +208,6 @@ router.put('/:id/approve', async (req, res) => {
   }
 });
 
-
-
-/**
- * =====================================================
- * PUT /orders/:id/reject
- * =====================================================
- */
 router.put('/:id/reject', async (req, res) => {
   try {
     await db.promise().query(
